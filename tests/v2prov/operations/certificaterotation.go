@@ -1,7 +1,9 @@
 package operations
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"testing"
 
 	v1 "github.com/rancher/rancher/pkg/apis/provisioning.cattle.io/v1"
@@ -17,6 +19,9 @@ import (
 
 // RunCertificateRotationTest expects a "created" v2prov cluster and will run a certificate rotation on it and perform assertions.
 func RunCertificateRotationTest(t *testing.T, clients *clients.Clients, c *v1.Cluster) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		newC, err := clients.Provisioning.Cluster().Get(c.Namespace, c.Name, metav1.GetOptions{})
 		if err != nil {
@@ -41,6 +46,28 @@ func RunCertificateRotationTest(t *testing.T, clients *clients.Clients, c *v1.Cl
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	t.Logf("Getting pods for cluster %s/%s", c.Namespace, c.Name)
+
+	pods, err := clients.K8s.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "custom-cluster-name=" + c.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pod := range pods.Items {
+		req := clients.K8s.CoreV1().Pods(c.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{})
+		logs, err := req.Stream(ctx)
+		if err != nil {
+			t.Fatalf("Failed to stream logs for %s/%s: %v", pod.Namespace, pod.Name, err)
+		}
+		buf := &bytes.Buffer{}
+		if _, err := io.Copy(buf, logs); err != nil {
+			t.Fatalf("Failed to copy logs for %s/%s: %v", pod.Namespace, pod.Name, err)
+		}
+		t.Logf("BEGIN LOGS FOR POD %s/%s", pod.Namespace, pod.Name)
+		t.Log(buf.String())
+		t.Logf("END LOGS FOR POD %s/%s", pod.Namespace, pod.Name)
 	}
 
 	_, err = cluster.WaitForCreate(clients, c)
